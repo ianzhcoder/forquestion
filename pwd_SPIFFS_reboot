@@ -1,0 +1,206 @@
+/*參考https://randomnerdtutorials.com/esp32-pwm-arduino-ide/
+   Channel為通道號，取值0 ~ 15;
+  Freq，設置頻率; Hz
+  resolution計數位數，取值0 ~ 20（該值決定後面ledcWrite方法中佔空比的最大值，如該值寫10，則佔空比最大可寫2^10-1=1023 ;
+  通道最終頻率 = 時鐘頻率 / （ 分頻係數 * （ 2^計數位數 ） ）;(分頻係數最大為1024）
+  該方法返回值：最終頻率;
+  ————————————————
+  https://blog.csdn.net/Aspiration_H/article/details/107604577
+*/
+#include "FS.h"
+#include "SPIFFS.h"
+
+#define RELAYN_GPIO 13
+#define PWM_GPIO 5
+#define EMERGENCY_DET_GPIO 4
+#define SENSVN_GPIO 39
+#define SENSVP_GPIO 36
+#define IRAM_ATTR_GPIO 22
+
+#define FORMAT_SPIFFS_IF_FAILED true
+
+// setting PWM properties
+const int RelayN_Freq = 3000;  //3kHz
+const int PWM_Freq = 1000;   //1kHz
+const int RelayN_Channel = 0;
+const int PWM_Channel = 1;
+const int resolution = 8;   //解析度設置為 8 位，Duty占空比
+
+int Relay_State, S1_State, S2_State, Emergency_Button, Emergency_State, Pwm_Init;
+String read_Duty;
+int sensorValue = 0;
+int sensorValue2 = 0;
+
+
+void initFS() {
+  if (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)) {
+    Serial.println("An error has occurred while mounting SPIFFS");
+  }
+  else {
+    Serial.println("SPIFFS mounted successfully");
+    writeFile(SPIFFS, "/value_record.txt", "TEST: \n");
+  }
+}
+
+void IRAM_ATTR AC_Off() {
+  sensorValue = analogRead(SENSVP_GPIO);
+}
+
+void setup() {
+  Serial.begin(115200);
+  initFS();
+  pinMode(EMERGENCY_DET_GPIO, INPUT);
+  pinMode(SENSVN_GPIO, INPUT);
+  pinMode(SENSVP_GPIO, INPUT);
+  //  pinMode(PWM_GPIO, OUTPUT);
+  pinMode(IRAM_ATTR_GPIO, INPUT);
+  // configure PWM functionalitites
+  ledcSetup(RelayN_Channel, RelayN_Freq, resolution);
+  ledcSetup(PWM_Channel, PWM_Freq, resolution);
+  // attach the Channel to the GPIO to be controlled
+  ledcAttachPin(RELAYN_GPIO, RelayN_Channel);
+  ledcAttachPin(PWM_GPIO, PWM_Channel);
+  ledcWrite(PWM_Channel, 255);
+  //digitalWrite(PWM_GPIO, HIGH);
+  Pwm_Init = 1;
+  //ledcWrite(PWM_Channel, 255);  //100%
+  sensorValue = analogRead(SENSVP_GPIO); //12V
+  Serial.print("sensorValue:");
+  Serial.println(sensorValue);
+
+  Relay_State = 0;
+  S2_State = 0;
+  S1_State = 0;
+  Emergency_State = 1;
+  Serial.println("Start!!!");
+
+  attachInterrupt(IRAM_ATTR_GPIO, AC_Off, RISING);
+
+}
+
+
+void RelayN() {
+
+  //50%開始測試
+  //ledcWrite(uint8_t Channel, uint32_t Duty) MAX:255
+  //https://microcontrollerslab.com/esp32-pwm-arduino-ide-led-fading-example/
+  if (!Relay_State) {
+    ledcWrite(RelayN_Channel, 255);  //100%
+    delay(100);
+    Relay_State = 1;
+  }
+  ledcWrite(RelayN_Channel, 127);   //50%
+  //ledcWrite(RelayN_Channel, 255);  //100%
+  read_Duty = ledcRead(RelayN_Channel);
+  Serial.println("RELAYN DUTY:");
+  Serial.println(read_Duty);
+  //ledcWrite(Channel, 51);  //20% close
+
+
+}
+
+void loop() {
+  sensorValue2 = sensorValue;
+  read_Duty = ledcRead(PWM_Channel);
+  Serial.print("PWM 100%:");
+  Serial.println(sensorValue);
+  if (sensorValue2 < 3200) {
+    if (S2_State && sensorValue2 > 2500) { //OFF
+      ledcWrite(RelayN_Channel, 0);  // relay Off
+      Relay_State = 0;
+      S2_State = 0;
+      Serial.println("閘門關閉");
+    } else if (sensorValue2 >= 2500) { //OFF
+      //ledcWrite(PWM_Channel, 204);   //80%
+      ledcWrite(PWM_Channel, 43);   //80%
+      S1_State = 1;
+      sensorValue = sensorValue2;
+      Serial.println("PWM 80 %:");
+      Serial.println(sensorValue2);
+      Serial.println("閘門尚未開啟");
+    } else if ( sensorValue2 >= 1600 && S1_State) { //ON
+      if(S2_State == 0){
+        char charValue[5];
+          memset(charValue, sensorValue2, 4);
+                    appendFile(SPIFFS, "/value_record.txt", "開始..." );
+                    appendFile(SPIFFS, "/value_record.txt", charValue );
+                    appendFile(SPIFFS, "/value_record.txt", "\n" );
+        }
+      Emergency_Button = digitalRead(EMERGENCY_DET_GPIO);
+      S2_State = 1;
+      sensorValue = sensorValue2;
+      if (Emergency_Button == 0 && Emergency_State == 0) {    //重新啟動時的狀態
+        Emergency_State = 1;
+        //ESP.restart();  //重新啟動
+        Relay_State = 0;
+      } else if (Emergency_Button == 0 && Emergency_State == 1) {
+        RelayN();
+      } 
+      Serial.println("閘門開啟:");
+      Serial.println(read_Duty);
+      Serial.println(sensorValue2);
+    }
+  } else {
+    ledcWrite(PWM_Channel, 255);   //100%
+    S1_State = 0;
+    //    Pwm_Init = 1;
+    readFile(SPIFFS, "/value_record.txt");
+    Serial.println("移除閘門開關: ");
+    sensorValue2 = sensorValue;
+    Serial.print("sensorValue2: ");
+    Serial.println(sensorValue2);
+    read_Duty = ledcRead(PWM_Channel);
+    Serial.print("PWM:");
+    Serial.println(read_Duty);
+  }
+  delay(50);
+}
+
+
+void readFile(fs::FS &fs, const char * path) {
+  Serial.printf("Reading file: %s\r\n", path);
+
+  File file = fs.open(path);
+  if (!file || file.isDirectory()) {
+    Serial.println("- failed to open file for reading");
+    return;
+  }
+
+  Serial.println("- read from file:");
+  while (file.available()) {
+    Serial.write(file.read());
+  }
+  file.close();
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message) {
+  Serial.printf("Writing file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if (!file) {
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("- file written");
+  } else {
+    Serial.println("- write failed");
+  }
+  file.close();
+}
+
+void appendFile(fs::FS &fs, const char * path, const String message) {
+  Serial.printf("Appending to file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_APPEND);
+  if (!file) {
+    Serial.println("- failed to open file for appending");
+    return;
+  }
+  if (file.print(message)) {
+    Serial.println("- message appended");
+  } else {
+    Serial.println("- append failed");
+  }
+  file.close();
+}
